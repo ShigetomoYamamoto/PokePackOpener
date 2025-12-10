@@ -52,6 +52,17 @@ VITE_POKEMON_TCG_API_KEY=your_api_key_here
 APIキーは [Pokémon TCG API](https://pokemontcg.io/) でアカウントを作成して取得できます。
 APIキーが設定されていない場合でも、APIキーなしで動作を試みますが、レート制限やCORSの問題が発生する可能性があります。
 
+### GitHub Pagesデプロイ時のAPIキー設定
+
+GitHub Pagesでデプロイする場合、GitHub Secretsを使用してAPIキーを設定してください：
+
+1. GitHubリポジトリの「Settings」→「Secrets and variables」→「Actions」に移動
+2. 「New repository secret」をクリック
+3. Name: `VITE_POKEMON_TCG_API_KEY`、Value: あなたのAPIキー を設定
+4. 「Add secret」をクリック
+
+これにより、GitHub Actionsのビルド時にAPIキーが環境変数として設定され、公開ページでもAPIが正常に動作します。
+
 ### 開発サーバーの起動
 
 ```bash
