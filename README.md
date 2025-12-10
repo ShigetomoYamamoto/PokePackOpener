@@ -58,7 +58,15 @@ GitHub Pagesでデプロイする場合、GitHub Secretsを使用してAPIキー
 
 1. GitHubリポジトリの「Settings」→「Secrets and variables」→「Actions」に移動
 2. 「New repository secret」をクリック
-3. Name: `VITE_POKEMON_TCG_API_KEY`、Value: あなたのAPIキー を設定
+3. 以下の情報を設定：
+   - **Name（コピー用）**: 
+     ```
+     VITE_POKEMON_TCG_API_KEY
+     ```
+   - **Secret（コピー用）**: 
+     ```
+     537f93ad-3e08-49db-b705-63e4fe37f891
+     ```
 4. 「Add secret」をクリック
 
 これにより、GitHub Actionsのビルド時にAPIキーが環境変数として設定され、公開ページでもAPIが正常に動作します。
