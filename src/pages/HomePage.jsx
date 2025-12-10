@@ -16,6 +16,11 @@ function HomePage() {
 
     try {
       const fetchedCards = await fetchRandomCards()
+      
+      if (!fetchedCards || fetchedCards.length === 0) {
+        throw new Error('カードが取得できませんでした')
+      }
+      
       const normalizedCards = fetchedCards.map(normalizeCard)
       
       // コレクションに追加
@@ -24,7 +29,9 @@ function HomePage() {
       setCards(normalizedCards)
     } catch (err) {
       console.error('パック開封エラー:', err)
-      setError('パックの開封に失敗しました。もう一度お試しください。')
+      // エラーメッセージを詳細に表示
+      const errorMessage = err.message || 'パックの開封に失敗しました。もう一度お試しください。'
+      setError(errorMessage)
     } finally {
       setLoading(false)
     }
