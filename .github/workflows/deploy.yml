@@ -26,7 +26,7 @@ jobs:
 
       - name: Build
         env:
-          VITE_POKEMON_TCG_API_KEY: ${{ secrets.VITE_POKEMON_TCG_API_KEY || '537f93ad-3e08-49db-b705-63e4fe37f891' }}
+          VITE_POKEMON_TCG_API_KEY: ${{ secrets.VITE_POKEMON_TCG_API_KEY }}
         run: npm run build
 
       - name: Deploy to GitHub Pages
