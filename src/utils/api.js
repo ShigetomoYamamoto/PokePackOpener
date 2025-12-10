@@ -28,55 +28,79 @@ function getHeaders() {
 
 /**
  * ランダムに5枚のカードを取得
+ * @param {Function} debugLog - デバッグログを追加するコールバック関数（オプション）
  * @returns {Promise<Array>} カードデータの配列
  */
-export async function fetchRandomCards() {
+export async function fetchRandomCards(debugLog = null) {
+  const log = (message, data = null) => {
+    if (debugLog) {
+      debugLog(message, data)
+    }
+    console.log(`[API] ${message}`, data || '')
+  }
+  
   try {
+    log('開始: カード取得処理を開始します')
+    log('APIキー設定状態', { hasApiKey: !!API_KEY, apiKeyLength: API_KEY ? API_KEY.length : 0 })
+    log('APIベースURL', API_BASE_URL)
+    
     // まず、利用可能なカードの総数を取得
-    const countResponse = await fetch(`${API_BASE_URL}?pageSize=1`, {
+    const countUrl = `${API_BASE_URL}?pageSize=1`
+    log('リクエスト1: カード総数を取得', { url: countUrl, headers: getHeaders() })
+    
+    const countResponse = await fetch(countUrl, {
       headers: getHeaders()
     })
     
+    log('レスポンス1: ステータス', { status: countResponse.status, statusText: countResponse.statusText, ok: countResponse.ok })
+    
     if (!countResponse.ok) {
       const errorText = await countResponse.text()
-      console.error('APIレスポンスエラー:', {
+      log('エラー: APIレスポンスエラー', {
         status: countResponse.status,
         statusText: countResponse.statusText,
         body: errorText
       })
-      throw new Error(`APIエラー: ${countResponse.status} ${countResponse.statusText}`)
+      throw new Error(`APIエラー: ${countResponse.status} ${countResponse.statusText} - ${errorText}`)
     }
 
     const countData = await countResponse.json()
+    log('レスポンス1: データ取得完了', countData)
     
     // APIレスポンスの形式を確認
     if (!countData || typeof countData !== 'object') {
+      log('エラー: APIレスポンスの形式が不正', countData)
       throw new Error('APIレスポンスの形式が不正です')
     }
     
     // totalCountが存在しない場合は、デフォルト値を使用
     const totalCount = countData.totalCount || 250
     const maxPage = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+    log('カード総数情報', { totalCount, maxPage, pageSize: PAGE_SIZE })
     
     // ランダムな5枚のカードを取得するため、ランダムなページを選択
     const randomPages = []
     for (let i = 0; i < 5; i++) {
       randomPages.push(Math.floor(Math.random() * maxPage) + 1)
     }
+    log('ランダムページ選択', { randomPages })
 
     // 各ページからランダムに1枚ずつ取得
     const cardPromises = randomPages.map(async (page) => {
+      log(`ページ ${page}: リクエスト開始`)
       try {
-        const response = await fetch(
-          `${API_BASE_URL}?page=${page}&pageSize=${PAGE_SIZE}`,
-          {
-            headers: getHeaders()
-          }
-        )
+        const pageUrl = `${API_BASE_URL}?page=${page}&pageSize=${PAGE_SIZE}`
+        log(`ページ ${page}: リクエスト送信`, { url: pageUrl })
+        
+        const response = await fetch(pageUrl, {
+          headers: getHeaders()
+        })
+
+        log(`ページ ${page}: レスポンス受信`, { status: response.status, statusText: response.statusText, ok: response.ok })
 
         if (!response.ok) {
           const errorText = await response.text()
-          console.error(`ページ ${page} の取得エラー:`, {
+          log(`ページ ${page}: エラー`, {
             status: response.status,
             statusText: response.statusText,
             body: errorText
@@ -85,33 +109,40 @@ export async function fetchRandomCards() {
         }
 
         const data = await response.json()
+        log(`ページ ${page}: データ取得`, { dataKeys: Object.keys(data), dataArrayLength: data.data?.length })
         
         // レスポンスの形式を確認
         if (!data || !Array.isArray(data.data)) {
-          console.warn(`ページ ${page} のレスポンス形式が不正です:`, data)
+          log(`ページ ${page}: レスポンス形式が不正`, data)
           return null
         }
         
         const cards = data.data || []
+        log(`ページ ${page}: カード数`, { count: cards.length })
         
         if (cards.length === 0) {
+          log(`ページ ${page}: カードが0枚`)
           return null
         }
         
         // ページ内からランダムに1枚選択
         const randomIndex = Math.floor(Math.random() * cards.length)
-        return cards[randomIndex]
+        const selectedCard = cards[randomIndex]
+        log(`ページ ${page}: カード選択`, { index: randomIndex, cardId: selectedCard?.id, cardName: selectedCard?.name })
+        return selectedCard
       } catch (error) {
-        console.error(`ページ ${page} の取得エラー:`, error)
+        log(`ページ ${page}: 例外発生`, { error: error.message, stack: error.stack })
         return null
       }
     })
 
     const cards = await Promise.all(cardPromises)
     let validCards = cards.filter(card => card !== null)
+    log('初期取得完了', { total: cards.length, valid: validCards.length, invalid: cards.length - validCards.length })
     
     // 5枚未満の場合は、不足分を再取得（無限ループを防ぐため、最大3回まで）
     if (validCards.length < 5) {
+      log('カードが不足しています。追加取得を開始', { current: validCards.length, needed: 5 - validCards.length })
       const additionalNeeded = 5 - validCards.length
       let attempts = 0
       const maxAttempts = 3
@@ -148,12 +179,19 @@ export async function fetchRandomCards() {
     
     // 5枚未満でも取得できた分を返す
     if (validCards.length === 0) {
+      log('エラー: カードが1枚も取得できませんでした')
       throw new Error('カードを取得できませんでした。APIへの接続を確認してください。')
     }
     
-    return validCards.slice(0, 5)
+    const result = validCards.slice(0, 5)
+    log('完了: カード取得成功', { count: result.length, cardIds: result.map(c => c.id) })
+    return result
   } catch (error) {
-    console.error('カード取得エラー:', error)
+    log('エラー: カード取得処理で例外発生', { 
+      message: error.message, 
+      stack: error.stack,
+      name: error.name 
+    })
     
     // より詳細なエラーメッセージを提供
     if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {

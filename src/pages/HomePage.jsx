@@ -8,32 +8,62 @@ function HomePage() {
   const [cards, setCards] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [debugLogs, setDebugLogs] = useState([])
+  const [showDebug, setShowDebug] = useState(true)
+
+  const addDebugLog = (message, data = null) => {
+    const timestamp = new Date().toLocaleTimeString()
+    const logEntry = {
+      timestamp,
+      message,
+      data: data ? JSON.stringify(data, null, 2) : null
+    }
+    setDebugLogs(prev => [...prev, logEntry])
+    console.log(`[${timestamp}] ${message}`, data || '')
+  }
 
   const handleOpenPack = async () => {
     setLoading(true)
     setError(null)
     setCards([])
+    setDebugLogs([])
+
+    addDebugLog('パック開封処理を開始')
 
     try {
-      const fetchedCards = await fetchRandomCards()
+      addDebugLog('fetchRandomCardsを呼び出し')
+      const fetchedCards = await fetchRandomCards(addDebugLog)
+      
+      addDebugLog('カード取得完了', { count: fetchedCards?.length })
       
       if (!fetchedCards || fetchedCards.length === 0) {
         throw new Error('カードが取得できませんでした')
       }
       
+      addDebugLog('カードを正規化中')
       const normalizedCards = fetchedCards.map(normalizeCard)
+      addDebugLog('カード正規化完了', { count: normalizedCards.length })
       
       // コレクションに追加
+      addDebugLog('コレクションに追加中')
       addToCollection(normalizedCards)
+      addDebugLog('コレクションへの追加完了')
       
       setCards(normalizedCards)
+      addDebugLog('パック開封処理が正常に完了しました')
     } catch (err) {
       console.error('パック開封エラー:', err)
+      addDebugLog('エラー発生', { 
+        message: err.message, 
+        stack: err.stack,
+        name: err.name 
+      })
       // エラーメッセージを詳細に表示
       const errorMessage = err.message || 'パックの開封に失敗しました。もう一度お試しください。'
       setError(errorMessage)
     } finally {
       setLoading(false)
+      addDebugLog('パック開封処理終了')
     }
   }
 
@@ -58,6 +88,40 @@ function HomePage() {
             {error}
           </div>
         )}
+
+        <div className="debug-section">
+          <button 
+            className="debug-toggle-button"
+            onClick={() => setShowDebug(!showDebug)}
+          >
+            {showDebug ? '▼' : '▶'} デバッグログ {showDebug ? '（非表示）' : '（表示）'}
+          </button>
+          
+          {showDebug && debugLogs.length > 0 && (
+            <div className="debug-log-container">
+              <div className="debug-log-header">
+                <span>デバッグログ（{debugLogs.length}件）</span>
+                <button 
+                  className="debug-clear-button"
+                  onClick={() => setDebugLogs([])}
+                >
+                  クリア
+                </button>
+              </div>
+              <div className="debug-log-content">
+                {debugLogs.map((log, index) => (
+                  <div key={index} className="debug-log-entry">
+                    <span className="debug-log-time">[{log.timestamp}]</span>
+                    <span className="debug-log-message">{log.message}</span>
+                    {log.data && (
+                      <pre className="debug-log-data">{log.data}</pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
 
         {cards.length > 0 && (
           <div className="opened-cards">
