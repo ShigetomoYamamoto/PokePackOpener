@@ -33,6 +33,25 @@ Pokémon TCG APIを使用してランダムにポケモンカードを取得し�
 npm install
 ```
 
+### 環境変数の設定（オプション）
+
+Pokémon TCG API v2では、無料プランでもAPIキーが必要な場合があります。
+APIキーを設定する場合は、プロジェクトルートに `.env` ファイルを作成してください：
+
+```bash
+cp .env.example .env
+# .envファイルを編集してAPIキーを設定
+```
+
+`.env` ファイルの例：
+
+```
+VITE_POKEMON_TCG_API_KEY=your_api_key_here
+```
+
+APIキーは [Pokémon TCG API](https://pokemontcg.io/) でアカウントを作成して取得できます。
+APIキーが設定されていない場合でも、APIキーなしで動作を試みますが、レート制限やCORSの問題が発生する可能性があります。
+
 ### 開発サーバーの起動
 
 ```bash
