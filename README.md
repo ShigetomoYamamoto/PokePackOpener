@@ -2,6 +2,8 @@
 
 Pokémon TCG APIを使用してランダムにポケモンカードを取得し、コレクションとして保存できるWebアプリケーションです。
 
+🌐 **公開URL**: https://shigetomoyamamoto.github.io/PokePackOpener/
+
 ## 機能
 
 - **パック開封機能**: ボタンをクリックすると、ランダムに5枚のポケモンカードを取得
