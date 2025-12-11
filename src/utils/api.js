@@ -10,6 +10,8 @@ const REQUEST_TIMEOUT = 20000 // 20秒でタイムアウト（モバイル環境
 const MAX_RETRIES = 3 // 最大リトライ回数（モバイル環境ではリトライが重要）
 const CACHE_EXPIRY = 7 * 24 * 60 * 60 * 1000 // キャッシュ有効期限: 7日間（長めに設定してキャッシュ効率を向上）
 const RETRY_DELAY_BASE = 1000 // リトライの基本遅延時間（ミリ秒）
+const PARALLEL_REQUESTS = 5 // 並列リクエスト数（5枚を並列取得）
+const MIN_PAGE_SIZE = 2 // APIでサポートされている最小ページサイズ（pageSize=1は失敗するため）
 
 // APIキーを環境変数から取得（GitHub Pagesでは環境変数が使えないため、空文字列の場合はヘッダーを送信しない）
 const API_KEY = import.meta.env.VITE_POKEMON_TCG_API_KEY || ''
@@ -226,103 +228,117 @@ export async function fetchRandomCards(debugLog = null, progressCallback = null)
     log('APIキー設定状態', { hasApiKey: !!API_KEY, apiKeyLength: API_KEY ? API_KEY.length : 0 })
     log('APIベースURL', API_BASE_URL)
     
-    // カード総数の取得を省略し、直接ランダムページを取得（高速化）
+    // カード総数の取得を省略し、直接ランダムカードを取得（高速化）
     // デバッグログから totalCount は約19818と判明しているため、固定値を使用
     const ESTIMATED_TOTAL_COUNT = 19818
+    const ESTIMATED_MAX_PAGE = Math.ceil(ESTIMATED_TOTAL_COUNT / PAGE_SIZE) // 約80ページ
     
-    // ページサイズを最適化: 小さすぎるとページ数が増えてキャッシュ効率が悪い
-    // 大きすぎるとレスポンスサイズが大きくなる
-    // 20枚取得してから5枚選択することで、キャッシュ効率とレスポンスサイズのバランスを取る
-    const OPTIMAL_PAGE_SIZE = 20 // 20枚取得（キャッシュ効率を重視）
-    const ESTIMATED_MAX_PAGE = Math.ceil(ESTIMATED_TOTAL_COUNT / OPTIMAL_PAGE_SIZE) // 約991ページ
-    
-    log('最適化されたリクエスト戦略', { 
+    log('並列リクエスト戦略', { 
       estimatedTotalCount: ESTIMATED_TOTAL_COUNT, 
-      optimalPageSize: OPTIMAL_PAGE_SIZE,
-      estimatedMaxPage: ESTIMATED_MAX_PAGE
+      estimatedMaxPage: ESTIMATED_MAX_PAGE,
+      parallelRequests: PARALLEL_REQUESTS,
+      minPageSize: MIN_PAGE_SIZE
     })
     
-    // 1つのランダムページから5枚取得
-    const randomPage = Math.floor(Math.random() * ESTIMATED_MAX_PAGE) + 1
-    log('ランダムページ選択', { page: randomPage, maxPage: ESTIMATED_MAX_PAGE, pageSize: OPTIMAL_PAGE_SIZE })
-    
-    const pageUrl = `${API_BASE_URL}?page=${randomPage}&pageSize=${OPTIMAL_PAGE_SIZE}`
-    log('リクエスト: カードページを取得', { url: pageUrl })
-    
-    if (progressCallback) {
-      progressCallback({ 
-        current: 1, 
-        total: 1, 
-        message: 'カードを取得中...' 
-      })
+    // 戦略: 5つの異なるページから各2枚ずつ並列取得（pageSize=1は失敗するため2枚に）
+    // 各リクエストは軽量で、1つが失敗しても他のリクエストは続行できる
+    const randomPages = []
+    for (let i = 0; i < PARALLEL_REQUESTS; i++) {
+      randomPages.push(Math.floor(Math.random() * ESTIMATED_MAX_PAGE) + 1)
     }
     
-    const response = await fetchWithTimeout(pageUrl, {
-      headers: getHeaders()
-    }, REQUEST_TIMEOUT, log)
+    log('ランダムページ選択', { pages: randomPages })
+    
+    // 並列リクエストを実行（各ページから2枚ずつ取得）
+    const cardPromises = randomPages.map(async (page, index) => {
+      const pageUrl = `${API_BASE_URL}?page=${page}&pageSize=${MIN_PAGE_SIZE}`
+      log(`並列リクエスト ${index + 1}/${PARALLEL_REQUESTS}: 開始`, { page, url: pageUrl })
+      
+      if (progressCallback) {
+        progressCallback({ 
+          current: index + 1, 
+          total: PARALLEL_REQUESTS, 
+          message: `カード ${index + 1}/${PARALLEL_REQUESTS} を取得中...` 
+        })
+      }
+      
+      try {
+        const response = await fetchWithTimeout(pageUrl, {
+          headers: getHeaders()
+        }, REQUEST_TIMEOUT, log)
 
-    log('レスポンス: ステータス', { status: response.status, statusText: response.statusText, ok: response.ok })
+        if (!response.ok) {
+          const errorText = await response.text()
+          log(`並列リクエスト ${index + 1}: エラー`, {
+            status: response.status,
+            statusText: response.statusText,
+            body: errorText
+          })
+          return null
+        }
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      log('エラー: カード取得エラー', {
-        status: response.status,
-        statusText: response.statusText,
-        body: errorText
-      })
-      throw new Error(`カード取得エラー: ${response.status} ${response.statusText}`)
-    }
-
-    const data = await response.json()
-    log('レスポンス: データ取得', { dataKeys: Object.keys(data), dataArrayLength: data.data?.length })
+        const data = await response.json()
+        
+        if (!data || !Array.isArray(data.data) || data.data.length === 0) {
+          log(`並列リクエスト ${index + 1}: データなし`, { data })
+          return null
+        }
+        
+        // 2枚取得したら、ランダムに1枚選択
+        const cards = data.data
+        const randomIndex = Math.floor(Math.random() * cards.length)
+        const card = cards[randomIndex]
+        
+        log(`並列リクエスト ${index + 1}: 成功`, { cardId: card.id, cardName: card.name })
+        
+        if (progressCallback) {
+          progressCallback({ 
+            current: index + 1, 
+            total: PARALLEL_REQUESTS, 
+            message: `カード ${index + 1}/${PARALLEL_REQUESTS} を取得完了` 
+          })
+        }
+        
+        return card
+      } catch (error) {
+        log(`並列リクエスト ${index + 1}: 例外`, { error: error.message })
+        return null
+      }
+    })
     
-    // レスポンスの形式を確認
-    if (!data || !Array.isArray(data.data)) {
-      log('エラー: レスポンス形式が不正', data)
-      throw new Error('APIレスポンスの形式が不正です')
-    }
+    // すべての並列リクエストを待機
+    const results = await Promise.all(cardPromises)
+    const validCards = results.filter(card => card !== null)
     
-    const cards = data.data || []
-    log('カード数', { count: cards.length })
+    log('並列リクエスト完了', { 
+      total: results.length,
+      valid: validCards.length,
+      invalid: results.length - validCards.length
+    })
     
-    if (cards.length === 0) {
-      log('エラー: カードが0枚')
-      throw new Error('カードが取得できませんでした')
-    }
-    
-    // ページ内からランダムに必要な枚数選択（重複なし）
-    const selectedCards = []
-    const availableIndices = Array.from({ length: cards.length }, (_, i) => i)
-    
-    while (selectedCards.length < CARDS_NEEDED && availableIndices.length > 0) {
-      const randomIndex = Math.floor(Math.random() * availableIndices.length)
-      const cardIndex = availableIndices.splice(randomIndex, 1)[0]
-      selectedCards.push(cards[cardIndex])
-    }
-    
-    if (progressCallback) {
-      progressCallback({ 
-        current: 1, 
-        total: 1, 
-        message: 'カード取得完了' 
-      })
+    if (validCards.length === 0) {
+      throw new Error('カードが取得できませんでした。ネットワーク接続を確認してください。')
     }
     
-    log('カード選択完了', { 
-      selectedCount: selectedCards.length, 
+    // 重複を除去（同じカードが複数取得された場合）
+    const uniqueCards = []
+    const seenIds = new Set()
+    for (const card of validCards) {
+      if (!seenIds.has(card.id)) {
+        seenIds.add(card.id)
+        uniqueCards.push(card)
+      }
+    }
+    
+    log('カード取得完了', { 
+      selectedCount: uniqueCards.length, 
       requestedCount: CARDS_NEEDED,
-      cardIds: selectedCards.map(c => c.id),
-      cardNames: selectedCards.map(c => c.name)
+      cardIds: uniqueCards.map(c => c.id),
+      cardNames: uniqueCards.map(c => c.name)
     })
     
-    if (selectedCards.length < CARDS_NEEDED) {
-      log('警告: 必要な枚数に満たない', { 
-        selected: selectedCards.length, 
-        needed: CARDS_NEEDED 
-      })
-    }
-    
-    return selectedCards
+    // 必要な枚数に満たない場合は、取得できた分だけ返す
+    return uniqueCards.slice(0, CARDS_NEEDED)
   } catch (error) {
     log('エラー: カード取得処理で例外発生', { 
       message: error.message, 
