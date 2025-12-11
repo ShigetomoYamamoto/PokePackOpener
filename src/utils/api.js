@@ -5,7 +5,8 @@
 
 const API_BASE_URL = 'https://api.pokemontcg.io/v2/cards'
 const PAGE_SIZE = 250 // APIの最大ページサイズ
-const REQUEST_TIMEOUT = 15000 // 15秒でタイムアウト
+const REQUEST_TIMEOUT = 60000 // 60秒でタイムアウト（モバイル環境を考慮）
+const MAX_RETRIES = 3 // 最大リトライ回数
 
 // APIキーを環境変数から取得（GitHub Pagesでは環境変数が使えないため、空文字列の場合はヘッダーを送信しない）
 const API_KEY = import.meta.env.VITE_POKEMON_TCG_API_KEY || ''
@@ -28,28 +29,62 @@ function getHeaders() {
 }
 
 /**
- * タイムアウト付きフェッチ
+ * タイムアウト付きフェッチ（リトライ機能付き）
  * @param {string} url - リクエストURL
  * @param {Object} options - フェッチオプション
  * @param {number} timeout - タイムアウト時間（ミリ秒）
+ * @param {Function} debugLog - デバッグログ関数
+ * @param {number} retryCount - 現在のリトライ回数
  * @returns {Promise<Response>}
  */
-async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT) {
+async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT, debugLog = null, retryCount = 0) {
+  const log = (message, data = null) => {
+    if (debugLog) {
+      debugLog(message, data)
+    }
+    console.log(`[Fetch] ${message}`, data || '')
+  }
+  
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), timeout)
+  const startTime = Date.now()
+  const timeoutId = setTimeout(() => {
+    log(`タイムアウト: ${timeout}ms経過`, { url, retryCount })
+    controller.abort()
+  }, timeout)
   
   try {
+    log(`リクエスト開始${retryCount > 0 ? ` (リトライ ${retryCount}/${MAX_RETRIES})` : ''}`, { url })
+    
     const response = await fetch(url, {
       ...options,
       signal: controller.signal
     })
+    
+    const duration = Date.now() - startTime
     clearTimeout(timeoutId)
+    log(`リクエスト完了`, { duration: `${duration}ms`, status: response.status })
     return response
   } catch (error) {
     clearTimeout(timeoutId)
+    const duration = Date.now() - startTime
+    
     if (error.name === 'AbortError') {
-      throw new Error(`リクエストがタイムアウトしました（${timeout}ms）`)
+      log(`タイムアウト発生`, { duration: `${duration}ms`, timeout: `${timeout}ms`, retryCount })
+      
+      // リトライ可能な場合
+      if (retryCount < MAX_RETRIES) {
+        const nextRetry = retryCount + 1
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 5000) // 指数バックオフ、最大5秒
+        log(`リトライを${delay}ms後に実行`, { nextRetry, maxRetries: MAX_RETRIES })
+        
+        await new Promise(resolve => setTimeout(resolve, delay))
+        return fetchWithTimeout(url, options, timeout, debugLog, nextRetry)
+      }
+      
+      throw new Error(`リクエストがタイムアウトしました（${timeout}ms）。${MAX_RETRIES}回リトライしましたが失敗しました。`)
     }
+    
+    log(`エラー発生`, { error: error.message, name: error.name, duration: `${duration}ms` })
     throw error
   }
 }
@@ -72,50 +107,22 @@ export async function fetchRandomCards(debugLog = null) {
     log('APIキー設定状態', { hasApiKey: !!API_KEY, apiKeyLength: API_KEY ? API_KEY.length : 0 })
     log('APIベースURL', API_BASE_URL)
     
-    // まず、利用可能なカードの総数を取得
-    const countUrl = `${API_BASE_URL}?pageSize=1`
-    log('リクエスト: カード総数を取得', { url: countUrl })
-    
-    const countResponse = await fetchWithTimeout(countUrl, {
-      headers: getHeaders()
-    })
-    
-    log('レスポンス: ステータス', { status: countResponse.status, statusText: countResponse.statusText, ok: countResponse.ok })
-    
-    if (!countResponse.ok) {
-      const errorText = await countResponse.text()
-      log('エラー: APIレスポンスエラー', {
-        status: countResponse.status,
-        statusText: countResponse.statusText,
-        body: errorText
-      })
-      throw new Error(`APIエラー: ${countResponse.status} ${countResponse.statusText} - ${errorText}`)
-    }
-
-    const countData = await countResponse.json()
-    log('レスポンス: データ取得完了', { totalCount: countData.totalCount, page: countData.page })
-    
-    // APIレスポンスの形式を確認
-    if (!countData || typeof countData !== 'object') {
-      log('エラー: APIレスポンスの形式が不正', countData)
-      throw new Error('APIレスポンスの形式が不正です')
-    }
-    
-    // totalCountが存在しない場合は、デフォルト値を使用
-    const totalCount = countData.totalCount || 19818
-    const maxPage = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
-    log('カード総数情報', { totalCount, maxPage, pageSize: PAGE_SIZE })
+    // カード総数の取得を省略し、直接ランダムページを取得（高速化）
+    // デバッグログから totalCount は約19818、maxPage は約80と判明しているため、固定値を使用
+    const ESTIMATED_TOTAL_COUNT = 19818
+    const ESTIMATED_MAX_PAGE = Math.ceil(ESTIMATED_TOTAL_COUNT / PAGE_SIZE) // 約80ページ
+    log('推定ページ情報', { estimatedTotalCount: ESTIMATED_TOTAL_COUNT, estimatedMaxPage: ESTIMATED_MAX_PAGE })
     
     // 1つのランダムページから5枚取得する方式に変更（効率化）
-    const randomPage = Math.floor(Math.random() * maxPage) + 1
-    log('ランダムページ選択', { page: randomPage })
+    const randomPage = Math.floor(Math.random() * ESTIMATED_MAX_PAGE) + 1
+    log('ランダムページ選択', { page: randomPage, maxPage: ESTIMATED_MAX_PAGE })
     
     const pageUrl = `${API_BASE_URL}?page=${randomPage}&pageSize=${PAGE_SIZE}`
     log('リクエスト: カードページを取得', { url: pageUrl })
     
     const response = await fetchWithTimeout(pageUrl, {
       headers: getHeaders()
-    })
+    }, REQUEST_TIMEOUT, log)
 
     log('レスポンス: ステータス', { status: response.status, statusText: response.statusText, ok: response.ok })
 
