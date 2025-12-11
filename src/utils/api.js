@@ -8,7 +8,7 @@ const PAGE_SIZE = 250 // APIの最大ページサイズ
 const CARDS_NEEDED = 5 // 必要なカード枚数
 const REQUEST_TIMEOUT = 20000 // 20秒でタイムアウト（モバイル環境を考慮）
 const MAX_RETRIES = 3 // 最大リトライ回数（モバイル環境ではリトライが重要）
-const CACHE_EXPIRY = 24 * 60 * 60 * 1000 // キャッシュ有効期限: 24時間
+const CACHE_EXPIRY = 7 * 24 * 60 * 60 * 1000 // キャッシュ有効期限: 7日間（長めに設定してキャッシュ効率を向上）
 const RETRY_DELAY_BASE = 1000 // リトライの基本遅延時間（ミリ秒）
 
 // APIキーを環境変数から取得（GitHub Pagesでは環境変数が使えないため、空文字列の場合はヘッダーを送信しない）
@@ -42,7 +42,9 @@ function getCachedData(url) {
     const cached = localStorage.getItem(cacheKey)
     if (cached) {
       const { data, timestamp } = JSON.parse(cached)
-      if (Date.now() - timestamp < CACHE_EXPIRY) {
+      const age = Date.now() - timestamp
+      if (age < CACHE_EXPIRY) {
+        console.log(`[Cache] キャッシュから取得 (${Math.floor(age / 1000)}秒前のキャッシュ)`)
         return data
       }
       // 期限切れのキャッシュを削除
@@ -67,17 +69,33 @@ function setCachedData(url, data) {
       timestamp: Date.now()
     }
     localStorage.setItem(cacheKey, JSON.stringify(cacheData))
+    console.log(`[Cache] キャッシュに保存: ${url}`)
   } catch (error) {
     console.warn('キャッシュ保存エラー:', error)
     // ストレージが満杯の場合、古いキャッシュを削除
     try {
       const keys = Object.keys(localStorage)
       const cacheKeys = keys.filter(key => key.startsWith('api_cache_'))
-      if (cacheKeys.length > 50) {
-        // 古いキャッシュを削除（50件を超える場合）
-        cacheKeys.sort().slice(0, cacheKeys.length - 50).forEach(key => {
-          localStorage.removeItem(key)
+      if (cacheKeys.length > 100) {
+        // 古いキャッシュを削除（100件を超える場合、より多く保持）
+        // タイムスタンプでソートして古いものを削除
+        const cacheEntries = cacheKeys.map(key => {
+          try {
+            const cached = localStorage.getItem(key)
+            if (cached) {
+              const { timestamp } = JSON.parse(cached)
+              return { key, timestamp }
+            }
+          } catch (e) {
+            return { key, timestamp: 0 }
+          }
+          return { key, timestamp: 0 }
         })
+        
+        cacheEntries.sort((a, b) => a.timestamp - b.timestamp)
+        const toDelete = cacheEntries.slice(0, cacheEntries.length - 100)
+        toDelete.forEach(({ key }) => localStorage.removeItem(key))
+        console.log(`[Cache] 古いキャッシュを${toDelete.length}件削除`)
       }
     } catch (cleanError) {
       console.warn('キャッシュクリーンアップエラー:', cleanError)
@@ -212,10 +230,11 @@ export async function fetchRandomCards(debugLog = null, progressCallback = null)
     // デバッグログから totalCount は約19818と判明しているため、固定値を使用
     const ESTIMATED_TOTAL_COUNT = 19818
     
-    // pageSize=1はAPIでサポートされていない可能性があるため、
-    // 必要最小限のページサイズ（5枚）で1つのリクエストから取得する方式に戻す
-    const OPTIMAL_PAGE_SIZE = CARDS_NEEDED // 5枚取得
-    const ESTIMATED_MAX_PAGE = Math.ceil(ESTIMATED_TOTAL_COUNT / OPTIMAL_PAGE_SIZE)
+    // ページサイズを最適化: 小さすぎるとページ数が増えてキャッシュ効率が悪い
+    // 大きすぎるとレスポンスサイズが大きくなる
+    // 20枚取得してから5枚選択することで、キャッシュ効率とレスポンスサイズのバランスを取る
+    const OPTIMAL_PAGE_SIZE = 20 // 20枚取得（キャッシュ効率を重視）
+    const ESTIMATED_MAX_PAGE = Math.ceil(ESTIMATED_TOTAL_COUNT / OPTIMAL_PAGE_SIZE) // 約991ページ
     
     log('最適化されたリクエスト戦略', { 
       estimatedTotalCount: ESTIMATED_TOTAL_COUNT, 
