@@ -168,6 +168,34 @@
   word-break: break-all;
 }
 
+.progress-info {
+  margin: 1rem 0;
+  text-align: center;
+}
+
+.progress-bar-container {
+  width: 100%;
+  max-width: 400px;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 0 auto 0.5rem;
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #f093fb 0%, #f5576c 100%);
+  transition: width 0.3s ease;
+  border-radius: 4px;
+}
+
+.progress-text {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
 @media (max-width: 768px) {
   .home-content h2 {
     font-size: 2rem;

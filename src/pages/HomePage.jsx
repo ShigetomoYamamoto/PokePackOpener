@@ -10,6 +10,7 @@ function HomePage() {
   const [error, setError] = useState(null)
   const [debugLogs, setDebugLogs] = useState([])
   const [showDebug, setShowDebug] = useState(true)
+  const [progress, setProgress] = useState(null)
 
   const addDebugLog = (message, data = null) => {
     const timestamp = new Date().toLocaleTimeString()
@@ -32,7 +33,10 @@ function HomePage() {
 
     try {
       addDebugLog('fetchRandomCardsを呼び出し')
-      const fetchedCards = await fetchRandomCards(addDebugLog)
+      const fetchedCards = await fetchRandomCards(addDebugLog, (progressInfo) => {
+        setProgress(progressInfo)
+        addDebugLog('プログレス更新', progressInfo)
+      })
       
       addDebugLog('カード取得完了', { count: fetchedCards?.length })
       
@@ -63,6 +67,7 @@ function HomePage() {
       setError(errorMessage)
     } finally {
       setLoading(false)
+      setProgress(null)
       addDebugLog('パック開封処理終了')
     }
   }
@@ -80,8 +85,20 @@ function HomePage() {
           onClick={handleOpenPack}
           disabled={loading}
         >
-          {loading ? '開封中...' : 'パックを開封する'}
+          {loading ? (progress ? progress.message : '開封中...') : 'パックを開封する'}
         </button>
+
+        {loading && progress && (
+          <div className="progress-info">
+            <div className="progress-bar-container">
+              <div 
+                className="progress-bar" 
+                style={{ width: `${(progress.current / progress.total) * 100}%` }}
+              />
+            </div>
+            <p className="progress-text">{progress.message}</p>
+          </div>
+        )}
 
         {error && (
           <div className="error-message">
