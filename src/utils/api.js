@@ -5,8 +5,10 @@
 
 const API_BASE_URL = 'https://api.pokemontcg.io/v2/cards'
 const PAGE_SIZE = 250 // APIの最大ページサイズ
-const REQUEST_TIMEOUT = 60000 // 60秒でタイムアウト（モバイル環境を考慮）
-const MAX_RETRIES = 3 // 最大リトライ回数
+const CARDS_NEEDED = 5 // 必要なカード枚数
+const REQUEST_TIMEOUT = 90000 // 90秒でタイムアウト（モバイル環境とAPIの遅延を考慮）
+const MAX_RETRIES = 2 // 最大リトライ回数（タイムアウト時間を延長したため、リトライ回数を減らす）
+const CACHE_EXPIRY = 24 * 60 * 60 * 1000 // キャッシュ有効期限: 24時間
 
 // APIキーを環境変数から取得（GitHub Pagesでは環境変数が使えないため、空文字列の場合はヘッダーを送信しない）
 const API_KEY = import.meta.env.VITE_POKEMON_TCG_API_KEY || ''
@@ -29,20 +31,89 @@ function getHeaders() {
 }
 
 /**
- * タイムアウト付きフェッチ（リトライ機能付き）
+ * キャッシュからデータを取得
+ * @param {string} url - リクエストURL
+ * @returns {Object|null} キャッシュされたデータ、またはnull
+ */
+function getCachedData(url) {
+  try {
+    const cacheKey = `api_cache_${btoa(url).replace(/[^a-zA-Z0-9]/g, '')}`
+    const cached = localStorage.getItem(cacheKey)
+    if (cached) {
+      const { data, timestamp } = JSON.parse(cached)
+      if (Date.now() - timestamp < CACHE_EXPIRY) {
+        return data
+      }
+      // 期限切れのキャッシュを削除
+      localStorage.removeItem(cacheKey)
+    }
+  } catch (error) {
+    console.warn('キャッシュ読み込みエラー:', error)
+  }
+  return null
+}
+
+/**
+ * データをキャッシュに保存
+ * @param {string} url - リクエストURL
+ * @param {Object} data - キャッシュするデータ
+ */
+function setCachedData(url, data) {
+  try {
+    const cacheKey = `api_cache_${btoa(url).replace(/[^a-zA-Z0-9]/g, '')}`
+    const cacheData = {
+      data,
+      timestamp: Date.now()
+    }
+    localStorage.setItem(cacheKey, JSON.stringify(cacheData))
+  } catch (error) {
+    console.warn('キャッシュ保存エラー:', error)
+    // ストレージが満杯の場合、古いキャッシュを削除
+    try {
+      const keys = Object.keys(localStorage)
+      const cacheKeys = keys.filter(key => key.startsWith('api_cache_'))
+      if (cacheKeys.length > 50) {
+        // 古いキャッシュを削除（50件を超える場合）
+        cacheKeys.sort().slice(0, cacheKeys.length - 50).forEach(key => {
+          localStorage.removeItem(key)
+        })
+      }
+    } catch (cleanError) {
+      console.warn('キャッシュクリーンアップエラー:', cleanError)
+    }
+  }
+}
+
+/**
+ * タイムアウト付きフェッチ（リトライ機能付き、キャッシュ対応）
  * @param {string} url - リクエストURL
  * @param {Object} options - フェッチオプション
  * @param {number} timeout - タイムアウト時間（ミリ秒）
  * @param {Function} debugLog - デバッグログ関数
  * @param {number} retryCount - 現在のリトライ回数
+ * @param {boolean} useCache - キャッシュを使用するか
  * @returns {Promise<Response>}
  */
-async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT, debugLog = null, retryCount = 0) {
+async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT, debugLog = null, retryCount = 0, useCache = true) {
   const log = (message, data = null) => {
     if (debugLog) {
       debugLog(message, data)
     }
     console.log(`[Fetch] ${message}`, data || '')
+  }
+  
+  // キャッシュチェック（初回リクエストのみ）
+  if (useCache && retryCount === 0) {
+    const cached = getCachedData(url)
+    if (cached) {
+      log('キャッシュから取得', { url })
+      // キャッシュされたデータをResponseオブジェクトとして返す
+      return new Response(JSON.stringify(cached), {
+        status: 200,
+        statusText: 'OK',
+        headers: { 'Content-Type': 'application/json' }
+      })
+    }
   }
   
   const controller = new AbortController()
@@ -63,6 +134,18 @@ async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT, de
     const duration = Date.now() - startTime
     clearTimeout(timeoutId)
     log(`リクエスト完了`, { duration: `${duration}ms`, status: response.status })
+    
+    // 成功したレスポンスをキャッシュ（初回リクエストのみ）
+    if (useCache && retryCount === 0 && response.ok) {
+      const clonedResponse = response.clone()
+      clonedResponse.json().then(data => {
+        setCachedData(url, data)
+        log('キャッシュに保存', { url })
+      }).catch(err => {
+        console.warn('キャッシュ保存失敗:', err)
+      })
+    }
+    
     return response
   } catch (error) {
     clearTimeout(timeoutId)
@@ -74,11 +157,12 @@ async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT, de
       // リトライ可能な場合
       if (retryCount < MAX_RETRIES) {
         const nextRetry = retryCount + 1
-        const delay = Math.min(1000 * Math.pow(2, retryCount), 5000) // 指数バックオフ、最大5秒
+        const delay = Math.min(2000 * Math.pow(2, retryCount), 10000) // 指数バックオフ、最大10秒
         log(`リトライを${delay}ms後に実行`, { nextRetry, maxRetries: MAX_RETRIES })
         
         await new Promise(resolve => setTimeout(resolve, delay))
-        return fetchWithTimeout(url, options, timeout, debugLog, nextRetry)
+        // リトライ時はキャッシュを使用しない（ネットワーク問題の可能性があるため）
+        return fetchWithTimeout(url, options, timeout, debugLog, nextRetry, false)
       }
       
       throw new Error(`リクエストがタイムアウトしました（${timeout}ms）。${MAX_RETRIES}回リトライしましたが失敗しました。`)
@@ -108,16 +192,25 @@ export async function fetchRandomCards(debugLog = null) {
     log('APIベースURL', API_BASE_URL)
     
     // カード総数の取得を省略し、直接ランダムページを取得（高速化）
-    // デバッグログから totalCount は約19818、maxPage は約80と判明しているため、固定値を使用
+    // デバッグログから totalCount は約19818と判明しているため、固定値を使用
     const ESTIMATED_TOTAL_COUNT = 19818
-    const ESTIMATED_MAX_PAGE = Math.ceil(ESTIMATED_TOTAL_COUNT / PAGE_SIZE) // 約80ページ
-    log('推定ページ情報', { estimatedTotalCount: ESTIMATED_TOTAL_COUNT, estimatedMaxPage: ESTIMATED_MAX_PAGE })
     
-    // 1つのランダムページから5枚取得する方式に変更（効率化）
+    // ページサイズを最適化: 5枚だけ必要なため、pageSize=5でリクエスト
+    // ただし、APIが5枚未満を返す可能性があるため、少し多めに取得
+    const OPTIMAL_PAGE_SIZE = Math.max(CARDS_NEEDED * 2, 10) // 10枚取得してから5枚選択
+    const ESTIMATED_MAX_PAGE = Math.ceil(ESTIMATED_TOTAL_COUNT / OPTIMAL_PAGE_SIZE)
+    
+    log('ページ情報', { 
+      estimatedTotalCount: ESTIMATED_TOTAL_COUNT, 
+      optimalPageSize: OPTIMAL_PAGE_SIZE,
+      estimatedMaxPage: ESTIMATED_MAX_PAGE 
+    })
+    
+    // ランダムページから最適化されたサイズで取得
     const randomPage = Math.floor(Math.random() * ESTIMATED_MAX_PAGE) + 1
-    log('ランダムページ選択', { page: randomPage, maxPage: ESTIMATED_MAX_PAGE })
+    log('ランダムページ選択', { page: randomPage, maxPage: ESTIMATED_MAX_PAGE, pageSize: OPTIMAL_PAGE_SIZE })
     
-    const pageUrl = `${API_BASE_URL}?page=${randomPage}&pageSize=${PAGE_SIZE}`
+    const pageUrl = `${API_BASE_URL}?page=${randomPage}&pageSize=${OPTIMAL_PAGE_SIZE}`
     log('リクエスト: カードページを取得', { url: pageUrl })
     
     const response = await fetchWithTimeout(pageUrl, {
@@ -153,26 +246,32 @@ export async function fetchRandomCards(debugLog = null) {
       throw new Error('カードが取得できませんでした')
     }
     
-    // ページ内からランダムに5枚選択（重複なし）
+    // ページ内からランダムに必要な枚数選択（重複なし）
     const selectedCards = []
     const selectedIndices = new Set()
     
-    while (selectedCards.length < 5 && selectedCards.length < cards.length) {
-      const randomIndex = Math.floor(Math.random() * cards.length)
-      if (!selectedIndices.has(randomIndex)) {
-        selectedIndices.add(randomIndex)
-        selectedCards.push(cards[randomIndex])
-      }
+    // Fisher-Yatesシャッフルの簡易版を使用してランダムに選択
+    const availableIndices = Array.from({ length: cards.length }, (_, i) => i)
+    
+    while (selectedCards.length < CARDS_NEEDED && availableIndices.length > 0) {
+      const randomIndex = Math.floor(Math.random() * availableIndices.length)
+      const cardIndex = availableIndices.splice(randomIndex, 1)[0]
+      selectedCards.push(cards[cardIndex])
     }
     
     log('カード選択完了', { 
       selectedCount: selectedCards.length, 
+      requestedCount: CARDS_NEEDED,
       cardIds: selectedCards.map(c => c.id),
       cardNames: selectedCards.map(c => c.name)
     })
     
-    if (selectedCards.length === 0) {
-      throw new Error('カードを選択できませんでした')
+    if (selectedCards.length < CARDS_NEEDED) {
+      log('警告: 必要な枚数に満たない', { 
+        selected: selectedCards.length, 
+        needed: CARDS_NEEDED 
+      })
+      // 取得できた分だけ返す（エラーにはしない）
     }
     
     return selectedCards
@@ -185,13 +284,17 @@ export async function fetchRandomCards(debugLog = null) {
     
     // より詳細なエラーメッセージを提供
     if (error.message.includes('タイムアウト')) {
-      throw new Error(`タイムアウトエラー: APIへの接続がタイムアウトしました（${REQUEST_TIMEOUT}ms）。ネットワーク接続を確認してください。`)
-    } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
-      throw new Error('ネットワークエラー: APIに接続できませんでした。インターネット接続を確認してください。')
+      throw new Error(`タイムアウトエラー: APIへの接続がタイムアウトしました（${REQUEST_TIMEOUT / 1000}秒）。ネットワーク接続が不安定な可能性があります。しばらく待ってから再度お試しください。`)
+    } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError') || error.message.includes('Load failed')) {
+      throw new Error('ネットワークエラー: APIに接続できませんでした。インターネット接続を確認してください。モバイルデータ通信の場合は、Wi-Fiに切り替えてお試しください。')
     } else if (error.message.includes('CORS')) {
       throw new Error('CORSエラー: ブラウザのセキュリティ設定により、APIへのアクセスがブロックされました。')
+    } else if (error.message.includes('AbortError')) {
+      throw new Error('リクエストが中断されました。ネットワーク接続を確認してください。')
     } else {
-      throw error
+      // 元のエラーメッセージを含めて、より詳細な情報を提供
+      const errorMessage = error.message || '不明なエラーが発生しました'
+      throw new Error(`APIエラー: ${errorMessage}`)
     }
   }
 }
