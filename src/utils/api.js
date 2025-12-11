@@ -147,6 +147,11 @@ async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT, de
   try {
     log(`リクエスト開始${retryCount > 0 ? ` (リトライ ${retryCount}/${MAX_RETRIES})` : ''}`, { url })
     
+    // ネットワーク状態を確認
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      throw new Error('オフライン状態です')
+    }
+    
     const response = await fetch(url, {
       ...options,
       signal: controller.signal
@@ -172,22 +177,31 @@ async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT, de
     clearTimeout(timeoutId)
     const duration = Date.now() - startTime
     
+    // より詳細なエラー情報を取得
+    const errorDetails = {
+      name: error.name,
+      message: error.message,
+      duration: `${duration}ms`,
+      retryCount,
+      url,
+      online: typeof navigator !== 'undefined' ? navigator.onLine : 'unknown'
+    }
+    
     // ネットワークエラーやタイムアウトの場合、リトライを試みる
     const isRetryableError = 
       error.name === 'AbortError' || 
       error.name === 'TypeError' ||
       error.message.includes('Failed to fetch') ||
       error.message.includes('Load failed') ||
-      error.message.includes('NetworkError')
+      error.message.includes('NetworkError') ||
+      error.message.includes('オフライン')
     
     if (isRetryableError && retryCount < MAX_RETRIES) {
       const nextRetry = retryCount + 1
       // 指数バックオフ: 1秒、2秒、4秒
       const delay = RETRY_DELAY_BASE * Math.pow(2, retryCount)
       log(`リトライ可能なエラー: ${error.name}`, { 
-        duration: `${duration}ms`, 
-        error: error.message,
-        retryCount,
+        ...errorDetails,
         nextRetry,
         delay: `${delay}ms`
       })
@@ -199,10 +213,7 @@ async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT, de
     }
     
     log(`エラー発生（リトライ不可）`, { 
-      error: error.message, 
-      name: error.name, 
-      duration: `${duration}ms`,
-      retryCount,
+      ...errorDetails,
       isRetryable: isRetryableError
     })
     throw error
