@@ -24,12 +24,19 @@ function HomePage() {
   }
 
   const handleOpenPack = async () => {
+    // オフライン状態をチェック
+    if (!navigator.onLine) {
+      setError('オフライン状態です。インターネット接続を確認してください。')
+      return
+    }
+
     setLoading(true)
     setError(null)
     setCards([])
     setDebugLogs([])
 
     addDebugLog('パック開封処理を開始')
+    addDebugLog('ネットワーク状態', { online: navigator.onLine })
 
     try {
       addDebugLog('fetchRandomCardsを呼び出し')

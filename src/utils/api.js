@@ -6,9 +6,10 @@
 const API_BASE_URL = 'https://api.pokemontcg.io/v2/cards'
 const PAGE_SIZE = 250 // APIの最大ページサイズ
 const CARDS_NEEDED = 5 // 必要なカード枚数
-const REQUEST_TIMEOUT = 30000 // 30秒でタイムアウト（短く設定して早期失敗）
-const MAX_RETRIES = 1 // 最大リトライ回数（短いタイムアウトのため1回のみ）
+const REQUEST_TIMEOUT = 20000 // 20秒でタイムアウト（モバイル環境を考慮）
+const MAX_RETRIES = 3 // 最大リトライ回数（モバイル環境ではリトライが重要）
 const CACHE_EXPIRY = 24 * 60 * 60 * 1000 // キャッシュ有効期限: 24時間
+const RETRY_DELAY_BASE = 1000 // リトライの基本遅延時間（ミリ秒）
 
 // APIキーを環境変数から取得（GitHub Pagesでは環境変数が使えないため、空文字列の場合はヘッダーを送信しない）
 const API_KEY = import.meta.env.VITE_POKEMON_TCG_API_KEY || ''
@@ -151,24 +152,39 @@ async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT, de
     clearTimeout(timeoutId)
     const duration = Date.now() - startTime
     
-    if (error.name === 'AbortError') {
-      log(`タイムアウト発生`, { duration: `${duration}ms`, timeout: `${timeout}ms`, retryCount })
+    // ネットワークエラーやタイムアウトの場合、リトライを試みる
+    const isRetryableError = 
+      error.name === 'AbortError' || 
+      error.name === 'TypeError' ||
+      error.message.includes('Failed to fetch') ||
+      error.message.includes('Load failed') ||
+      error.message.includes('NetworkError')
+    
+    if (isRetryableError && retryCount < MAX_RETRIES) {
+      const nextRetry = retryCount + 1
+      // 指数バックオフ: 1秒、2秒、4秒
+      const delay = RETRY_DELAY_BASE * Math.pow(2, retryCount)
+      log(`リトライ可能なエラー: ${error.name}`, { 
+        duration: `${duration}ms`, 
+        error: error.message,
+        retryCount,
+        nextRetry,
+        delay: `${delay}ms`
+      })
+      log(`リトライを${delay}ms後に実行`, { nextRetry, maxRetries: MAX_RETRIES })
       
-      // リトライ可能な場合
-      if (retryCount < MAX_RETRIES) {
-        const nextRetry = retryCount + 1
-        const delay = Math.min(2000 * Math.pow(2, retryCount), 10000) // 指数バックオフ、最大10秒
-        log(`リトライを${delay}ms後に実行`, { nextRetry, maxRetries: MAX_RETRIES })
-        
-        await new Promise(resolve => setTimeout(resolve, delay))
-        // リトライ時はキャッシュを使用しない（ネットワーク問題の可能性があるため）
-        return fetchWithTimeout(url, options, timeout, debugLog, nextRetry, false)
-      }
-      
-      throw new Error(`リクエストがタイムアウトしました（${timeout}ms）。${MAX_RETRIES}回リトライしましたが失敗しました。`)
+      await new Promise(resolve => setTimeout(resolve, delay))
+      // リトライ時はキャッシュを使用しない（ネットワーク問題の可能性があるため）
+      return fetchWithTimeout(url, options, timeout, debugLog, nextRetry, false)
     }
     
-    log(`エラー発生`, { error: error.message, name: error.name, duration: `${duration}ms` })
+    log(`エラー発生（リトライ不可）`, { 
+      error: error.message, 
+      name: error.name, 
+      duration: `${duration}ms`,
+      retryCount,
+      isRetryable: isRetryableError
+    })
     throw error
   }
 }
@@ -296,14 +312,17 @@ export async function fetchRandomCards(debugLog = null, progressCallback = null)
     })
     
     // より詳細なエラーメッセージを提供
-    if (error.message.includes('タイムアウト')) {
-      throw new Error(`タイムアウトエラー: APIへの接続がタイムアウトしました（${REQUEST_TIMEOUT / 1000}秒）。ネットワーク接続が不安定な可能性があります。しばらく待ってから再度お試しください。`)
+    if (error.message.includes('タイムアウト') || error.message.includes('AbortError')) {
+      throw new Error(`接続タイムアウト: ネットワーク接続が不安定な可能性があります。電車内や移動中の場合、しばらく待ってから再度お試しください。`)
     } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError') || error.message.includes('Load failed')) {
-      throw new Error('ネットワークエラー: APIに接続できませんでした。インターネット接続を確認してください。モバイルデータ通信の場合は、Wi-Fiに切り替えてお試しください。')
+      // オフライン状態をチェック
+      const isOffline = !navigator.onLine
+      if (isOffline) {
+        throw new Error('オフライン状態です。インターネット接続を確認してください。')
+      }
+      throw new Error('ネットワークエラー: APIに接続できませんでした。電車内や移動中の場合、ネットワークが不安定な可能性があります。しばらく待ってから再度お試しください。')
     } else if (error.message.includes('CORS')) {
       throw new Error('CORSエラー: ブラウザのセキュリティ設定により、APIへのアクセスがブロックされました。')
-    } else if (error.message.includes('AbortError')) {
-      throw new Error('リクエストが中断されました。ネットワーク接続を確認してください。')
     } else {
       // 元のエラーメッセージを含めて、より詳細な情報を提供
       const errorMessage = error.message || '不明なエラーが発生しました'
