@@ -40,10 +40,15 @@ function HomePage() {
 
     try {
       addDebugLog('fetchRandomCardsを呼び出し')
-      const fetchedCards = await fetchRandomCards(addDebugLog, (progressInfo) => {
-        setProgress(progressInfo)
-        addDebugLog('プログレス更新', progressInfo)
-      })
+      // APIが失敗した場合にモックデータを使用（開発・テスト用）
+      const fetchedCards = await fetchRandomCards(
+        addDebugLog, 
+        (progressInfo) => {
+          setProgress(progressInfo)
+          addDebugLog('プログレス更新', progressInfo)
+        },
+        false // モックデータを使用しない（本番環境ではfalse）
+      )
       
       addDebugLog('カード取得完了', { count: fetchedCards?.length })
       

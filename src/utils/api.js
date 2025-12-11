@@ -224,9 +224,10 @@ async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT, de
  * ランダムに5枚のカードを取得
  * @param {Function} debugLog - デバッグログを追加するコールバック関数（オプション）
  * @param {Function} progressCallback - プログレスコールバック関数（オプション）
+ * @param {boolean} useMockOnError - エラー時にモックデータを使用するか（デフォルト: false）
  * @returns {Promise<Array>} カードデータの配列
  */
-export async function fetchRandomCards(debugLog = null, progressCallback = null) {
+export async function fetchRandomCards(debugLog = null, progressCallback = null, useMockOnError = false) {
   const log = (message, data = null) => {
     if (debugLog) {
       debugLog(message, data)
@@ -357,16 +358,25 @@ export async function fetchRandomCards(debugLog = null, progressCallback = null)
       name: error.name 
     })
     
+    // モックデータを使用するオプション
+    if (useMockOnError) {
+      log('警告: APIエラーが発生したため、モックデータを使用します')
+      const { getMockCards } = await import('./mockData.js')
+      const mockCards = getMockCards()
+      log('モックデータを返却', { count: mockCards.length })
+      return mockCards
+    }
+    
     // より詳細なエラーメッセージを提供
     if (error.message.includes('タイムアウト') || error.message.includes('AbortError')) {
-      throw new Error(`接続タイムアウト: ネットワーク接続が不安定な可能性があります。電車内や移動中の場合、しばらく待ってから再度お試しください。`)
+      throw new Error(`接続タイムアウト: Pokémon TCG APIへの接続がタイムアウトしました。APIが応答していない可能性があります。しばらく待ってから再度お試しください。`)
     } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError') || error.message.includes('Load failed')) {
       // オフライン状態をチェック
-      const isOffline = !navigator.onLine
+      const isOffline = typeof navigator !== 'undefined' && !navigator.onLine
       if (isOffline) {
         throw new Error('オフライン状態です。インターネット接続を確認してください。')
       }
-      throw new Error('ネットワークエラー: APIに接続できませんでした。電車内や移動中の場合、ネットワークが不安定な可能性があります。しばらく待ってから再度お試しください。')
+      throw new Error('API接続エラー: Pokémon TCG APIに接続できませんでした。APIが一時的に利用できない可能性があります。しばらく待ってから再度お試しください。')
     } else if (error.message.includes('CORS')) {
       throw new Error('CORSエラー: ブラウザのセキュリティ設定により、APIへのアクセスがブロックされました。')
     } else {
