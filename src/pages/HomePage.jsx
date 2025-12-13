@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { fetchRandomCards, normalizeCard } from '../utils/api'
+import { openPack } from '../utils/api'
 import { addToCollection } from '../utils/storage'
 import CardGrid from '../components/CardGrid'
 import './HomePage.css'
@@ -8,25 +8,31 @@ function HomePage() {
   const [cards, setCards] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [notice, setNotice] = useState(null)
+  const [saved, setSaved] = useState(false)
 
   const handleOpenPack = async () => {
     setLoading(true)
     setError(null)
+    setNotice(null)
+    setSaved(false)
     setCards([])
 
     try {
-      const fetchedCards = await fetchRandomCards()
-      
-      if (!fetchedCards || fetchedCards.length === 0) {
+      const result = await openPack()
+
+      if (!result?.cards || result.cards.length === 0) {
         throw new Error('カードが取得できませんでした')
       }
-      
-      const normalizedCards = fetchedCards.map(normalizeCard)
-      
-      // コレクションに追加
-      addToCollection(normalizedCards)
-      
-      setCards(normalizedCards)
+
+      setCards(result.cards)
+      setNotice(result.notice || null)
+
+      // NOTE: フォールバック（モックなど）の場合はコレクションを汚さない
+      if (result.canSave) {
+        addToCollection(result.cards)
+        setSaved(true)
+      }
     } catch (err) {
       console.error('パック開封エラー:', err)
       // エラーメッセージを詳細に表示
@@ -62,10 +68,21 @@ function HomePage() {
         {cards.length > 0 && (
           <div className="opened-cards">
             <h3>開封されたカード（{cards.length}枚）</h3>
+            {notice && (
+              <div className="notice-message">
+                {notice}
+              </div>
+            )}
             <CardGrid cards={cards} />
-            <p className="collection-notice">
-              ✓ カードはコレクションに自動保存されました
-            </p>
+            {saved ? (
+              <p className="collection-notice">
+                ✓ カードはコレクションに自動保存されました
+              </p>
+            ) : (
+              <p className="collection-notice">
+                ※ 今回の結果はコレクションへ保存しません
+              </p>
+            )}
           </div>
         )}
       </div>
