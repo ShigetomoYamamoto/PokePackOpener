@@ -26,7 +26,10 @@ jobs:
 
       - name: Build
         env:
-          VITE_POKEMON_TCG_API_KEY: ${{ secrets.VITE_POKEMON_TCG_API_KEY || '537f93ad-3e08-49db-b705-63e4fe37f891' }}
+          # NOTE: Vite の環境変数は「ビルド時」に注入する必要があります
+          VITE_POKEMON_TCG_API_KEY: ${{ secrets.VITE_POKEMON_TCG_API_KEY }}
+          # 1 にすると API を使わずモック表示（開発/テスト用）
+          VITE_POKEMON_TCG_USE_MOCK: ${{ secrets.VITE_POKEMON_TCG_USE_MOCK }}
         run: npm run build
 
       - name: Deploy to GitHub Pages

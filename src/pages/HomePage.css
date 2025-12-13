@@ -56,6 +56,15 @@
   border: 1px solid rgba(255, 0, 0, 0.5);
 }
 
+.notice-message {
+  background: rgba(0, 150, 255, 0.18);
+  color: white;
+  padding: 0.9rem 1rem;
+  border-radius: 8px;
+  margin: 0 0 1rem 0;
+  border: 1px solid rgba(0, 150, 255, 0.45);
+}
+
 .opened-cards {
   margin-top: 3rem;
   text-align: left;

@@ -3,8 +3,23 @@
  * https://docs.pokemontcg.io/
  */
 
+import { getCollection } from './storage'
+
 const API_BASE_URL = 'https://api.pokemontcg.io/v2/cards'
-const PAGE_SIZE = 250 // APIの最大ページサイズ
+// NOTE: 以前は 250 件/ページを前提にしていましたが、APIが重い/不安定な時に
+// 1回のレスポンスが大きいほど失敗しやすくなるため、ここでは小さめに絞ります。
+const PAGE_SIZE = 50
+
+// API接続が不安定な場合に備えた制御値
+// NOTE: APIが遅い場合は待ちすぎるとUXが悪化するため、まずは短めで打ち切ってフォールバックします
+const REQUEST_TIMEOUT_MS = 10000
+const RETRY_COUNT = 1
+const RETRY_BASE_DELAY_MS = 500
+const MAX_PAGE_GUESS = 200 // totalCount取得をせず「当たりそうな範囲」を推定
+
+// APIフォールバック用のキャッシュ（正規化済みカードを保存）
+const API_CACHE_KEY = 'pokepack_api_card_pool_v1'
+const API_CACHE_LIMIT = 200
 
 // APIキーを環境変数から取得（GitHub Pagesでは環境変数が使えないため、空文字列の場合はヘッダーを送信しない）
 const API_KEY = import.meta.env.VITE_POKEMON_TCG_API_KEY || ''
@@ -27,141 +42,291 @@ function getHeaders() {
 }
 
 /**
- * ランダムに5枚のカードを取得
- * @returns {Promise<Array>} カードデータの配列
+ * 指定ミリ秒だけ待機
+ * @param {number} ms
+ * @returns {Promise<void>}
  */
-export async function fetchRandomCards() {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * タイムアウト付きfetch（AbortController）
+ * @param {string} url
+ * @param {Object} options
+ * @param {number} timeoutMs
+ */
+async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
   try {
-    // まず、利用可能なカードの総数を取得
-    const countResponse = await fetch(`${API_BASE_URL}?pageSize=1`, {
-      headers: getHeaders()
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
     })
-    
-    if (!countResponse.ok) {
-      const errorText = await countResponse.text()
-      console.error('APIレスポンスエラー:', {
-        status: countResponse.status,
-        statusText: countResponse.statusText,
-        body: errorText
-      })
-      throw new Error(`APIエラー: ${countResponse.status} ${countResponse.statusText}`)
-    }
+    return response
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
 
-    const countData = await countResponse.json()
-    
-    // APIレスポンスの形式を確認
-    if (!countData || typeof countData !== 'object') {
-      throw new Error('APIレスポンスの形式が不正です')
-    }
-    
-    // totalCountが存在しない場合は、デフォルト値を使用
-    const totalCount = countData.totalCount || 250
-    const maxPage = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
-    
-    // ランダムな5枚のカードを取得するため、ランダムなページを選択
-    const randomPages = []
-    for (let i = 0; i < 5; i++) {
-      randomPages.push(Math.floor(Math.random() * maxPage) + 1)
-    }
+function isRetryableError(error) {
+  if (!error) return false
+  // ネットワーク断・DNS・CORSなどはブラウザによって例外メッセージが揺れるため幅広く拾う
+  const message = String(error.message || '')
+  return (
+    error.name === 'AbortError' ||
+    message.includes('Failed to fetch') ||
+    message.includes('NetworkError') ||
+    message.includes('Load failed') ||
+    message.includes('fetch') // 保守的
+  )
+}
 
-    // 各ページからランダムに1枚ずつ取得
-    const cardPromises = randomPages.map(async (page) => {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}?page=${page}&pageSize=${PAGE_SIZE}`,
-          {
-            headers: getHeaders()
-          }
-        )
+/**
+ * JSON取得（HTTPエラー時は本文もログ）
+ * @param {string} url
+ * @returns {Promise<any>}
+ */
+async function fetchJson(url) {
+  const response = await fetchWithTimeout(url, { headers: getHeaders() }, REQUEST_TIMEOUT_MS)
 
-        if (!response.ok) {
-          const errorText = await response.text()
-          console.error(`ページ ${page} の取得エラー:`, {
-            status: response.status,
-            statusText: response.statusText,
-            body: errorText
-          })
-          throw new Error(`カード取得エラー: ${response.status} ${response.statusText}`)
-        }
-
-        const data = await response.json()
-        
-        // レスポンスの形式を確認
-        if (!data || !Array.isArray(data.data)) {
-          console.warn(`ページ ${page} のレスポンス形式が不正です:`, data)
-          return null
-        }
-        
-        const cards = data.data || []
-        
-        if (cards.length === 0) {
-          return null
-        }
-        
-        // ページ内からランダムに1枚選択
-        const randomIndex = Math.floor(Math.random() * cards.length)
-        return cards[randomIndex]
-      } catch (error) {
-        console.error(`ページ ${page} の取得エラー:`, error)
-        return null
-      }
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '')
+    console.error('APIレスポンスエラー:', {
+      url,
+      status: response.status,
+      statusText: response.statusText,
+      body: errorText
     })
+    throw new Error(`APIエラー: ${response.status} ${response.statusText}`)
+  }
 
-    const cards = await Promise.all(cardPromises)
-    let validCards = cards.filter(card => card !== null)
-    
-    // 5枚未満の場合は、不足分を再取得（無限ループを防ぐため、最大3回まで）
-    if (validCards.length < 5) {
-      const additionalNeeded = 5 - validCards.length
-      let attempts = 0
-      const maxAttempts = 3
-      
-      while (validCards.length < 5 && attempts < maxAttempts) {
-        attempts++
-        try {
-          // 追加のランダムページから取得
-          const additionalPage = Math.floor(Math.random() * maxPage) + 1
-          const response = await fetch(
-            `${API_BASE_URL}?page=${additionalPage}&pageSize=${PAGE_SIZE}`,
-            {
-              headers: getHeaders()
-            }
-          )
-          
-          if (response.ok) {
-            const data = await response.json()
-            if (data && Array.isArray(data.data) && data.data.length > 0) {
-              const existingIds = new Set(validCards.map(card => card.id))
-              const newCards = data.data.filter(card => !existingIds.has(card.id))
-              
-              if (newCards.length > 0) {
-                const randomIndex = Math.floor(Math.random() * newCards.length)
-                validCards.push(newCards[randomIndex])
-              }
-            }
-          }
-        } catch (error) {
-          console.error('追加カード取得エラー:', error)
-        }
+  return await response.json()
+}
+
+/**
+ * リトライ付きJSON取得（指数バックオフ）
+ * @param {string} url
+ * @returns {Promise<any>}
+ */
+async function fetchJsonWithRetry(url) {
+  let lastError = null
+
+  for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
+    try {
+      return await fetchJson(url)
+    } catch (error) {
+      lastError = error
+      const message = String(error.message || '')
+      const statusMatch = message.match(/APIエラー:\s*(\d{3})/)
+      const status = statusMatch ? Number(statusMatch[1]) : null
+      const retryableHttp = status === 429 || status === 408 || (typeof status === 'number' && status >= 500)
+      const retryable = isRetryableError(error) || retryableHttp
+      if (!retryable || attempt === RETRY_COUNT) {
+        throw error
       }
+      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt)
+      await sleep(delay)
     }
-    
-    // 5枚未満でも取得できた分を返す
-    if (validCards.length === 0) {
-      throw new Error('カードを取得できませんでした。APIへの接続を確認してください。')
-    }
-    
-    return validCards.slice(0, 5)
+  }
+
+  throw lastError || new Error('不明なエラーが発生しました')
+}
+
+function pickRandomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min
+}
+
+function sampleUnique(cards, count, existingIds = new Set()) {
+  const result = []
+  const pool = Array.isArray(cards) ? [...cards] : []
+
+  while (pool.length > 0 && result.length < count) {
+    const idx = Math.floor(Math.random() * pool.length)
+    const candidate = pool.splice(idx, 1)[0]
+    if (!candidate || !candidate.id) continue
+    if (existingIds.has(candidate.id)) continue
+    existingIds.add(candidate.id)
+    result.push(candidate)
+  }
+
+  return result
+}
+
+function readApiCachePool() {
+  try {
+    const raw = localStorage.getItem(API_CACHE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
   } catch (error) {
-    console.error('カード取得エラー:', error)
-    
-    // より詳細なエラーメッセージを提供
-    if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
-      throw new Error('ネットワークエラー: APIに接続できませんでした。インターネット接続を確認してください。')
-    } else if (error.message.includes('CORS')) {
-      throw new Error('CORSエラー: ブラウザのセキュリティ設定により、APIへのアクセスがブロックされました。')
-    } else {
-      throw error
+    console.warn('APIキャッシュ読み込みエラー:', error)
+    return []
+  }
+}
+
+function writeApiCachePool(pool) {
+  try {
+    const trimmed = Array.isArray(pool) ? pool.slice(-API_CACHE_LIMIT) : []
+    localStorage.setItem(API_CACHE_KEY, JSON.stringify(trimmed))
+  } catch (error) {
+    console.warn('APIキャッシュ保存エラー:', error)
+  }
+}
+
+function getMockPack() {
+  // NOTE: オフラインでも最低限 UI を動かすためのモック（画像URLは空＝プレースホルダ表示）
+  const now = new Date().toISOString()
+  return [
+    { id: 'mock-001', name: 'ピカチュウ', imageUrl: '', types: ['雷'], rarity: 'コモン', set: 'モックセット', fetchedAt: now },
+    { id: 'mock-002', name: 'ヒトカゲ', imageUrl: '', types: ['炎'], rarity: 'コモン', set: 'モックセット', fetchedAt: now },
+    { id: 'mock-003', name: 'ゼニガメ', imageUrl: '', types: ['水'], rarity: 'コモン', set: 'モックセット', fetchedAt: now },
+    { id: 'mock-004', name: 'フシギダネ', imageUrl: '', types: ['草'], rarity: 'コモン', set: 'モックセット', fetchedAt: now },
+    { id: 'mock-005', name: 'イーブイ', imageUrl: '', types: ['無色'], rarity: 'コモン', set: 'モックセット', fetchedAt: now },
+  ]
+}
+
+function buildUserFacingErrorMessage(error) {
+  const message = String(error?.message || '')
+  if (message.includes('AbortError')) {
+    return 'タイムアウト: Pokémon TCG API の応答が遅いため、取得に失敗しました。'
+  }
+  if (message.includes('Failed to fetch') || message.includes('NetworkError') || message.includes('Load failed')) {
+    return 'ネットワークエラー: Pokémon TCG API に接続できませんでした。'
+  }
+  if (message.includes('CORS')) {
+    return 'CORSエラー: ブラウザのセキュリティ設定により API へのアクセスがブロックされました。'
+  }
+  if (message.includes('APIエラー: 401') || message.includes('APIエラー: 403')) {
+    return '認証エラー: APIキーが無効、または権限が不足している可能性があります。'
+  }
+  if (message.includes('APIエラー: 429')) {
+    return 'レート制限: APIの呼び出し回数上限に達した可能性があります。'
+  }
+  return message || 'カード取得に失敗しました。'
+}
+
+async function fetchPackFromApi() {
+  // NOTE: APIが重い時の失敗を減らすため、基本は「1ページ取得→ページ内から5枚抽選」
+  const existingIds = new Set()
+  let selected = []
+  let lastError = null
+  const pagesToTry = [pickRandomInt(1, MAX_PAGE_GUESS), pickRandomInt(1, MAX_PAGE_GUESS)]
+
+  for (const page of pagesToTry) {
+    if (selected.length >= 5) break
+    const url = `${API_BASE_URL}?page=${page}&pageSize=${PAGE_SIZE}`
+
+    try {
+      const data = await fetchJsonWithRetry(url)
+      if (!data || !Array.isArray(data.data)) {
+        console.warn('APIレスポンス形式が不正です:', data)
+        continue
+      }
+      const picked = sampleUnique(data.data, 5 - selected.length, existingIds)
+      selected = [...selected, ...picked]
+    } catch (error) {
+      lastError = error
+      console.error(`API取得エラー（page=${page}）:`, error)
+    }
+  }
+
+  if (selected.length === 0) {
+    throw lastError || new Error('カードを取得できませんでした。')
+  }
+
+  const normalized = selected.slice(0, 5).map(normalizeCard)
+
+  // 成功時はキャッシュプールを更新（オフライン時のフォールバック用）
+  const pool = readApiCachePool()
+  const existing = new Set(pool.map((c) => c.id))
+  const merged = [...pool, ...normalized.filter((c) => c?.id && !existing.has(c.id))]
+  writeApiCachePool(merged)
+
+  return normalized
+}
+
+function getPackFromApiCache() {
+  const pool = readApiCachePool()
+  if (!pool || pool.length < 5) return null
+  const picked = sampleUnique(pool, 5, new Set())
+  return picked.length > 0 ? picked : null
+}
+
+function getPackFromCollection() {
+  try {
+    const collection = getCollection()
+    if (!Array.isArray(collection) || collection.length < 5) return null
+    const picked = sampleUnique(collection, 5, new Set())
+    return picked.length > 0 ? picked : null
+  } catch (error) {
+    console.warn('コレクションフォールバック取得エラー:', error)
+    return null
+  }
+}
+
+/**
+ * パックを開封（正規化済みカードを返す）
+ *
+ * - APIが落ちている/遅い場合でも、キャッシュ/コレクション/モックにフォールバックして動作を継続します
+ * - 開発・テスト用に `?mock=1` または `VITE_POKEMON_TCG_USE_MOCK=1` で強制モックにできます
+ *
+ * @returns {Promise<{cards: Array, source: 'api'|'cache'|'collection'|'mock', notice: string|null, canSave: boolean}>}
+ */
+export async function openPack() {
+  const forceMockByEnv = String(import.meta.env.VITE_POKEMON_TCG_USE_MOCK || '') === '1'
+  const forceMockByQuery = (() => {
+    try {
+      if (typeof window === 'undefined') return false
+      const params = new URLSearchParams(window.location.search || '')
+      return params.get('mock') === '1'
+    } catch {
+      return false
+    }
+  })()
+
+  if (forceMockByEnv || forceMockByQuery) {
+    return {
+      cards: getMockPack(),
+      source: 'mock',
+      notice: 'モックデータで表示しています（開発/テスト用）。',
+      canSave: false,
+    }
+  }
+
+  try {
+    const cards = await fetchPackFromApi()
+    return { cards, source: 'api', notice: null, canSave: true }
+  } catch (error) {
+    const userMessage = buildUserFacingErrorMessage(error)
+
+    const cached = getPackFromApiCache()
+    if (cached) {
+      return {
+        cards: cached,
+        source: 'cache',
+        notice: `${userMessage} 代わりにキャッシュから表示しています。`,
+        canSave: true,
+      }
+    }
+
+    const fromCollection = getPackFromCollection()
+    if (fromCollection) {
+      return {
+        cards: fromCollection,
+        source: 'collection',
+        notice: `${userMessage} 代わりにコレクションから表示しています。`,
+        canSave: false,
+      }
+    }
+
+    return {
+      cards: getMockPack(),
+      source: 'mock',
+      notice: `${userMessage} 代わりにモックデータで表示しています。`,
+      canSave: false,
     }
   }
 }
